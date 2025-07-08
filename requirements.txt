@@ -1,0 +1,7 @@
+langchain
+langchain_community
+langchain_ollama
+ollama
+opencc-python-reimplemented
+sentence-transformers
+numpy
