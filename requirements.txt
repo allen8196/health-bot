@@ -5,3 +5,4 @@ ollama
 opencc-python-reimplemented
 sentence-transformers
 numpy
+pymilvus
