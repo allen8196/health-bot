@@ -6,3 +6,5 @@ opencc-python-reimplemented
 sentence-transformers
 numpy
 pymilvus
+transformers
+torch

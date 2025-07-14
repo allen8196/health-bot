@@ -3,7 +3,7 @@ import numpy as np
 
 model = SentenceTransformer("BAAI/bge-large-zh")
 
-instruction = "為這個問題或問題生成一個向量："
+instruction = "為這個問題或句子生成一個向量："
 
 
 def to_vector(text, normalize=True):
