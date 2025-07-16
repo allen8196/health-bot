@@ -1,22 +1,28 @@
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from embedding import to_vector
+from pymilvus import (
+    Collection,
+    CollectionSchema,
+    DataType,
+    FieldSchema,
+    connections,
+    utility,
+)
 
-from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Collection, utility
+from embedding import to_vector
 
 # 連線到 Milvus
 connections.connect(uri="http://localhost:19530")
 
 
-
 # ----------讀取衛教文章 ----------
-with open("qa.txt", "r", encoding="utf-8") as f:
+with open("article.txt", "r", encoding="utf-8") as f:
     content = f.read()
 
 # ----------語意導向切段 ----------
 splitter = RecursiveCharacterTextSplitter(
     separators=["\n\n", "\n", "。", "！", "？", "，", " ", ""],
-    chunk_size=100,
-    chunk_overlap=50
+    chunk_size=200,
+    chunk_overlap=50,
 )
 chunks = splitter.split_text(content)
 
@@ -24,13 +30,12 @@ chunks = splitter.split_text(content)
 chunks_vector = to_vector(chunks)
 
 
-
 VECTOR_DIM = chunks_vector.shape[1]
 
 fields = [
     FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),  # 主鍵
     FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=1000),
-    FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=VECTOR_DIM)
+    FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=VECTOR_DIM),
 ]
 
 schema = CollectionSchema(fields=fields, description="For RAG search")
@@ -57,11 +62,10 @@ collection.insert([texts, vectors])
 collection.create_index(
     field_name="embedding",
     index_params={
-        "metric_type": "COSINE",        # 可選：COSINE / IP / L2
-        "index_type": "IVF_FLAT",       # 可選：FLAT / IVF_FLAT / HNSW / ANNOY
-        "params": {"nlist": 128}
-    }
+        "metric_type": "COSINE",  # 可選：COSINE / IP / L2
+        "index_type": "IVF_FLAT",  # 可選：FLAT / IVF_FLAT / HNSW / ANNOY
+        "params": {"nlist": 128},
+    },
 )
 
-print("123132132")
-
+print("已將資料載入 Milvus")
