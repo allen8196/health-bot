@@ -22,7 +22,7 @@ SUMMARY_PROMPT = """請將以下使用者與助理的對話摘要為一段簡潔
 摘要："""
 
 # System 人設
-SYSTEM_PROMPT = "你是一位貼心的孫子/孫女，正在用自然、關懷的語氣和爺爺奶奶對話，請使用繁體中文，語氣親切簡短。不要講故事或過長的建議，請像日常對話一樣簡單回應。"
+SYSTEM_PROMPT = os.getenv("SYS_PROMPT").replace("\\n", "\n")
 
 
 class HealthChatAgent:
@@ -41,10 +41,11 @@ class HealthChatAgent:
             prompt=ChatPromptTemplate.from_template(SUMMARY_PROMPT),
         )
 
+
     def search_milvus(self, user_text):
         try:
             connections.connect(alias="default", uri="http://localhost:19530")
-            collection = Collection("demo1")
+            collection = Collection("copd_qa")
             collection.load()
             user_vec = to_vector(user_text)
             results = collection.search(
@@ -52,25 +53,28 @@ class HealthChatAgent:
                 anns_field="embedding",
                 param={"metric_type": "COSINE", "params": {"nprobe": 10}},
                 limit=3,
-                output_fields=["text"],
+                output_fields=["question", "answer", "category"],
             )
             connections.disconnect(alias="default")
 
-            threshold = float(os.getenv("SIMILARITY_THRESHOLD", "0.85"))
+            threshold = float(os.getenv("SIMILARITY_THRESHOLD"))
             relevant_chunks = []
 
-            print("\n🔍 前 3 筆相似檢索結果（含相似度）")
+            print("\n🔍 前 3 筆相似 QA（含相似度）")
             for i, hit in enumerate(results[0]):
                 score = hit.score
-                chunk_text = hit.entity.get("text")
-                print(f"Top {i+1} | 相似度: {score:.4f}\n內容: {chunk_text}\n")
+                q = hit.entity.get("question")
+                a = hit.entity.get("answer")
+                cat = hit.entity.get("category")
+                print(f"Top {i+1} | 相似度: {score:.4f}\n[{cat}] Q: {q}\nA: {a}\n")
                 if score >= threshold:
-                    relevant_chunks.append(chunk_text)
+                    relevant_chunks.append(f"[{cat}]\nQ: {q}\nA: {a}")
 
             return relevant_chunks
         except Exception as e:
             print(f"[Milvus 錯誤] {e}")
             return []
+
 
     def chat(self, user_input):
         chunks = self.search_milvus(user_input)

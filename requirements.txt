@@ -8,3 +8,4 @@ numpy
 pymilvus
 transformers
 torch
+openpyxl
