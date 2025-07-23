@@ -1,40 +1,42 @@
 import os
 from time import time
+
 from dotenv import load_dotenv
 from langchain.memory import ConversationSummaryMemory
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import OllamaLLM
 from pymilvus import Collection, connections
+
 from embedding import to_vector
 
 # 載入 .env
 load_dotenv()
 
 # 中文摘要 prompt
-SUMMARY_PROMPT = """請將以下使用者與助理的對話摘要為一段簡潔描述，摘要請使用繁體中文。
-
+SUMMARY_PROMPT = """你是對話摘要助手，請用繁體中文將以下對話整理為簡潔摘要。
+👓 先前摘要：
 {summary}
-對話內容：
+
+💬 本輪對話：
 {new_lines}
-摘要："""
+
+📝 請產生一段更新後的摘要：
+"""
+
 
 # System 人設
 SYSTEM_PROMPT = os.getenv("SYS_PROMPT").replace("\\n", "\n")
 
 # 明確描述知識庫範圍
-KNOWLEDGE_BASE_SCOPE = (
-    "知識庫僅包含與 COPD（慢性阻塞性肺病）與呼吸道保健有關的問題與答案，"
-    "範圍涵蓋：疾病症狀、日常照護、運動指導、飲食建議、呼吸訓練等。"
-    "不包含藥物機轉、外科治療、非呼吸相關疾病（如糖尿病、高血壓）等其他醫療主題。"
-)
+KNOWLEDGE_BASE_SCOPE = os.getenv("KNOWLEDGE_BASE_SCOPE").replace("\\n", "\n")
+
 
 class HealthChatAgent:
     def __init__(self, user_id: str):
         self.user_id = user_id
         self.llm = self._init_llm()
         self.memory = self._init_memory()
-        self.dialog_count = 0
 
     def _init_llm(self):
         return OllamaLLM(model="adsfaaron/taide-lx-7b-chat:q5")
@@ -77,49 +79,58 @@ class HealthChatAgent:
             return []
 
     def intent_detect(self, user_input):
-        """
-        利用 LLM 根據知識庫範圍判斷是否需要查詢知識庫（RAG）。
-        回傳 True/False
-        """
-        judge_prompt = (
+        light_llm = OllamaLLM(model="qwen:1.8b-chat")  # 小中文模型
+        prompt = (
             f"{KNOWLEDGE_BASE_SCOPE}\n\n"
-            f"請判斷下列用戶發問，是否『必須查詢上述知識庫才能提供正確答案』？"
-            f"若需要請只回答yes，不需要請只回答no。\n\n"
-            f"用戶發問：{user_input}"
+            f"以下是使用者的問題，請判斷是否需要查詢知識庫才能正確回答：\n"
+            f"「{user_input}」\n\n"
+            f"請只回答 yes 或 no，不要加其他文字。"
         )
-        resp = self.llm.invoke([SystemMessage("你是知識庫查詢意圖判斷員"), HumanMessage(judge_prompt)])
+        resp = light_llm.invoke([HumanMessage(prompt)])
+        print("🤖 小模型意圖判斷結果：", resp)
         return "yes" in resp.lower()
 
-    def build_prompt(self, user_input, context="", history="", step_by_step=True):
-        chat_messages = [SystemMessage(content=SYSTEM_PROMPT)]
-        if context:
-            chat_messages.append(HumanMessage(content=f"以下是你可以參考的健康資料：\n{context}"))
-        if history:
-            chat_messages.append(HumanMessage(content=f"過去的對話摘要如下：\n{history}"))
-        if step_by_step:
-            user_input = f"請用步驟說明方式回答。{user_input}"
-        chat_messages.append(HumanMessage(content=user_input))
-        return chat_messages
+    def build_prompt_by_template(self, user_input, context=None, summary=None):
+        sys_prompt = SYSTEM_PROMPT
+        base_template = os.getenv("BASE_PROMPT_TEMPLATE")
+
+        context_block = f"📚 以下為參考資料：\n{context.strip()}" if context else ""
+        summary_block = f"🧠 對話摘要：\n{summary.strip()}" if summary else ""
+
+        full_prompt = base_template.format(
+            sys_prompt=sys_prompt,
+            context_block=context_block,
+            summary_block=summary_block,
+            user_input=user_input.strip(),
+        )
+
+        return [SystemMessage(content=sys_prompt), HumanMessage(content=full_prompt)]
 
     def chat(self, user_input):
-        # === 1. 進行意圖判斷（讓LLM根據知識庫範圍判斷要不要查RAG）===
+        # === 1. 是否需查詢知識庫 ===
         need_rag = self.intent_detect(user_input)
-        # === 2. 檢索RAG ===
+        print("🤖 小模型意圖判斷結果：", need_rag)
         chunks = self.search_milvus(user_input) if need_rag else []
-        # === 3. 讀取過去摘要 ===
+        context = "\n\n".join(chunks) if chunks else None
+
+        # === 2. 載入摘要記憶（第二輪起才會有） ===
         history = self.memory.load_memory_variables({})["chat_history"]
-        # === 4. 組裝 prompt 並呼叫 LLM ===
-        chat_messages = self.build_prompt(user_input, context="\n\n".join(chunks), history=history)
+        summary = history if history.strip() else None
+
+        # === 3. 組裝 prompt ===
+        chat_messages = self.build_prompt_by_template(
+            user_input=user_input, context=context, summary=summary
+        )
+
+        # === 4. 取得回覆並記憶 ===
         response = self.llm.invoke(chat_messages)
-        # === 5. 儲存記憶，輪次管理 ===
         self.memory.save_context({"input": user_input}, {"output": response})
-        self.dialog_count += 1
-        if self.dialog_count % 3 == 0:
-            self.memory.clear()
-            print("📝 已對話三輪，自動摘要並重置 history！")
+
         print("\n🧠 使用者摘要記憶：")
         print(self.memory.load_memory_variables({})["chat_history"])
+
         return response
+
 
 def main():
     print("👤 多使用者健康對話測試模式")
@@ -134,6 +145,7 @@ def main():
         reply = agent.chat(user_text)
         print("👧 金孫：", reply)
         print(f"⏱️ 執行時間：{time() - start_time:.2f} 秒\n")
+
 
 if __name__ == "__main__":
     main()
