@@ -1,8 +1,7 @@
 import os
+import json
 from time import time
-
 from dotenv import load_dotenv
-from langchain.memory import ConversationSummaryMemory
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import OllamaLLM
@@ -13,122 +12,117 @@ from embedding import to_vector
 # 載入 .env
 load_dotenv()
 
-# 中文摘要 prompt
-SUMMARY_PROMPT = """你是對話摘要助手，請用繁體中文將以下對話整理為簡潔摘要。
-👓 先前摘要：
-{summary}
+# === 全域 LLM ===
+PRIMARY_LLM = OllamaLLM(model="adsfaaron/taide-lx-7b-chat:q5")
 
-💬 本輪對話：
-{new_lines}
-
-📝 請產生一段更新後的摘要：
-"""
-
-
-# System 人設
+# 系統參數
 SYSTEM_PROMPT = os.getenv("SYS_PROMPT").replace("\\n", "\n")
+BASE_PROMPT_TEMPLATE = os.getenv("BASE_PROMPT_TEMPLATE")
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD"))
 
-# 明確描述知識庫範圍
-KNOWLEDGE_BASE_SCOPE = os.getenv("KNOWLEDGE_BASE_SCOPE").replace("\\n", "\n")
+
+def classify_intent(user_input: str, llm: OllamaLLM) -> str:
+    try:
+        # 讀取外部 JSON 檔案
+        with open("intent.json", "r", encoding="utf-8") as f:
+            categories = json.load(f)
+
+        rag_keywords = "\n".join(f"- {k}" for k in categories.get("rag", []))
+        chat_keywords = "\n".join(f"- {k}" for k in categories.get("chat", []))
+
+        prompt = f"""
+你是一個嚴謹的分類模型，只能將輸入分類為兩種：「rag」或「chat」。
+請根據以下分類邏輯判斷使用者的意圖，只輸出 rag 或 chat（只能小寫，不能有標點或其他文字）：
+
+【RAG 分類條件】
+若問題涉及以下類型的資料查詢，請輸出 rag：
+{rag_keywords}
+
+【CHAT 分類條件】
+若問題只是一般聊天、改寫、說明或情感互動，不需查詢資料庫，請輸出 chat：
+{chat_keywords}
+
+【範例】
+使用者輸入：請幫我找出 COPD_QA.xlsx 裡提到的運動種類有哪些 👉 輸出：rag
+使用者輸入：什麼是縮唇呼吸？ 👉 輸出：rag
+使用者輸入：請問 COPD 跟氣喘的差別是什麼 👉 輸出：rag
+使用者輸入：幫我用比較口語的方式解釋什麼是肺氣腫 👉 輸出：chat
+使用者輸入：可以幫我寫一句鼓勵COPD病人的話嗎 👉 輸出：chat
+使用者輸入：幫我把「腹式呼吸有助減少呼吸困難」改寫成長輩聽得懂的說法 👉 輸出：chat
+
+【現在請分類】
+使用者輸入：{user_input}
+請你只輸出 rag 或 chat：
+        """.strip()
+
+        print("prompt", prompt)
+        result = llm.invoke([HumanMessage(content=prompt)]).strip().lower()
+
+        return result if result in ["rag", "chat"] else "chat"  # fallback
+    except Exception as e:
+        print(f"[分類錯誤] {e}")
+        return "chat"
+
+
+
+
+def search_milvus(user_text: str) -> str:
+    try:
+        connections.connect(alias="default", uri="http://localhost:19530")
+        collection = Collection("copd_qa")
+        collection.load()
+        user_vec = to_vector(user_text)
+        results = collection.search(
+            data=[user_vec],
+            anns_field="embedding",
+            param={"metric_type": "COSINE", "params": {"nprobe": 10}},
+            limit=3,
+            output_fields=["question", "answer", "category"],
+        )
+        connections.disconnect(alias="default")
+        relevant_chunks = []
+        for hit in results[0]:
+            score = hit.score
+            q = hit.entity.get("question")
+            a = hit.entity.get("answer")
+            cat = hit.entity.get("category")
+            if score >= SIMILARITY_THRESHOLD:
+                relevant_chunks.append(f"[{cat}]\nQ: {q}\nA: {a}")
+        return "\n\n".join(relevant_chunks)
+    except Exception as e:
+        return f"[Milvus 錯誤] {e}"
 
 
 class HealthChatAgent:
     def __init__(self, user_id: str):
         self.user_id = user_id
-        self.llm = self._init_llm()
-        self.memory = self._init_memory()
+        self.chat_history = []
+        self.llm = PRIMARY_LLM
 
-    def _init_llm(self):
-        return OllamaLLM(model="adsfaaron/taide-lx-7b-chat:q5")
-
-    def _init_memory(self):
-        return ConversationSummaryMemory(
-            llm=self.llm,
-            memory_key="chat_history",
-            prompt=ChatPromptTemplate.from_template(SUMMARY_PROMPT),
-        )
-
-    def search_milvus(self, user_text):
-        try:
-            connections.connect(alias="default", uri="http://localhost:19530")
-            collection = Collection("copd_qa")
-            collection.load()
-            user_vec = to_vector(user_text)
-            results = collection.search(
-                data=[user_vec],
-                anns_field="embedding",
-                param={"metric_type": "COSINE", "params": {"nprobe": 10}},
-                limit=3,
-                output_fields=["question", "answer", "category"],
-            )
-            connections.disconnect(alias="default")
-            threshold = float(os.getenv("SIMILARITY_THRESHOLD"))
-            relevant_chunks = []
-            print("\n🔍 前 3 筆相似 QA（含相似度）")
-            for i, hit in enumerate(results[0]):
-                score = hit.score
-                q = hit.entity.get("question")
-                a = hit.entity.get("answer")
-                cat = hit.entity.get("category")
-                print(f"Top {i+1} | 相似度: {score:.4f}\n[{cat}] Q: {q}\nA: {a}\n")
-                if score >= threshold:
-                    relevant_chunks.append(f"[{cat}]\nQ: {q}\nA: {a}")
-            return relevant_chunks
-        except Exception as e:
-            print(f"[Milvus 錯誤] {e}")
-            return []
-
-    def intent_detect(self, user_input):
-        light_llm = OllamaLLM(model="qwen:1.8b-chat")  # 小中文模型
-        prompt = (
-            f"{KNOWLEDGE_BASE_SCOPE}\n\n"
-            f"以下是使用者的問題，請判斷是否需要查詢知識庫才能正確回答：\n"
-            f"「{user_input}」\n\n"
-            f"請只回答 yes 或 no，不要加其他文字。"
-        )
-        resp = light_llm.invoke([HumanMessage(prompt)])
-        print("🤖 小模型意圖判斷結果：", resp)
-        return "yes" in resp.lower()
-
-    def build_prompt_by_template(self, user_input, context=None, summary=None):
-        sys_prompt = SYSTEM_PROMPT
-        base_template = os.getenv("BASE_PROMPT_TEMPLATE")
-
+    def build_prompt(self, user_input: str, context: str = None):
         context_block = f"📚 以下為參考資料：\n{context.strip()}" if context else ""
-        summary_block = f"🧠 對話摘要：\n{summary.strip()}" if summary else ""
-
-        full_prompt = base_template.format(
-            sys_prompt=sys_prompt,
+        full_prompt = BASE_PROMPT_TEMPLATE.format(
+            sys_prompt=SYSTEM_PROMPT,
             context_block=context_block,
-            summary_block=summary_block,
+            summary_block="",
             user_input=user_input.strip(),
         )
 
-        return [SystemMessage(content=sys_prompt), HumanMessage(content=full_prompt)]
+        messages = [SystemMessage(content=SYSTEM_PROMPT)]
+        for pair in self.chat_history:
+            messages.append(HumanMessage(content=pair["input"]))
+            messages.append(HumanMessage(content=pair["output"]))
+        messages.append(HumanMessage(content=full_prompt))
 
-    def chat(self, user_input):
-        # === 1. 是否需查詢知識庫 ===
-        need_rag = self.intent_detect(user_input)
-        print("🤖 小模型意圖判斷結果：", need_rag)
-        chunks = self.search_milvus(user_input) if need_rag else []
-        context = "\n\n".join(chunks) if chunks else None
+        return messages
 
-        # === 2. 載入摘要記憶（第二輪起才會有） ===
-        history = self.memory.load_memory_variables({})["chat_history"]
-        summary = history if history.strip() else None
-
-        # === 3. 組裝 prompt ===
-        chat_messages = self.build_prompt_by_template(
-            user_input=user_input, context=context, summary=summary
-        )
-
-        # === 4. 取得回覆並記憶 ===
-        response = self.llm.invoke(chat_messages)
-        self.memory.save_context({"input": user_input}, {"output": response})
-
-        print("\n🧠 使用者摘要記憶：")
-        print(self.memory.load_memory_variables({})["chat_history"])
-
+    def chat(self, user_input: str):
+        intent = classify_intent(user_input, self.llm)
+        print("🔍 分類結果：", intent)
+        context = search_milvus(user_input) if intent == "rag" else None
+        messages = self.build_prompt(user_input, context=context)
+        response = self.llm.invoke(messages)
+        self.chat_history.append({"input": user_input, "output": str(response)})
         return response
 
 

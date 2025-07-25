@@ -1,10 +1,10 @@
+import json
 import os
 
-from dotenv import load_dotenv
+with open("intent.json", "r", encoding="utf-8") as f:
+    categories = json.load(f)
 
-load_dotenv()
-template_str1 = os.getenv("SYS_PROMPT").replace("\\n", "\n")
-KNOWLEDGE_BASE_SCOPE = os.getenv("KNOWLEDGE_BASE_SCOPE").replace("\\n", "\n")
-print(template_str1)
-print("-------------------------------------------------------")
-print(KNOWLEDGE_BASE_SCOPE)
+    rag_keywords = "\n".join(f"- {k}" for k in categories.get("rag", []))
+    print("rag_keywords", rag_keywords)
+    chat_keywords = "\n".join(f"- {k}" for k in categories.get("chat", []))
+    print("chat_keywords", chat_keywords)
