@@ -51,8 +51,11 @@ class Bot:
 """.strip()
 
     def search_milvus(self, query: str) -> str:
-        """Milvus 查詢函式"""
+        """Milvus 查詢函式，只返回相似度高於閾值的結果"""
         try:
+            # 獲取相似度閾值
+            similarity_threshold = float(os.getenv("SIMILARITY_THRESHOLD"))
+            
             connections.connect(alias="default", uri="http://localhost:19530")
             collection = Collection("copd_qa")
             collection.load()
@@ -65,17 +68,24 @@ class Bot:
                 data=[user_vec],  # user_vec 已經是 list，包在 [] 中成為向量列表
                 anns_field="embedding",
                 param={"metric_type": "COSINE", "params": {"nprobe": 10}},
-                limit=3,
+                limit=5,  # 增加搜索數量以便篩選
                 output_fields=["question", "answer", "category"],
             )
             connections.disconnect(alias="default")
+            
             relevant_chunks = []
             for hit in results[0]:
                 score = hit.score
-                q = hit.entity.get("question")
-                a = hit.entity.get("answer")
-                cat = hit.entity.get("category")
-                relevant_chunks.append(f"[{cat}]\nQ: {q}\nA: {a}")
+                # 只有相似度高於閾值的結果才加入
+                if score >= similarity_threshold:
+                    q = hit.entity.get("question")
+                    a = hit.entity.get("answer")
+                    cat = hit.entity.get("category")
+                    relevant_chunks.append(f"[{cat}] (相似度: {score:.3f})\nQ: {q}\nA: {a}")
+            
+            if not relevant_chunks:
+                return f"[查詢結果] 沒有找到相似度高於 {similarity_threshold} 的相關內容"
+            
             return "\n\n".join(relevant_chunks)
         except Exception as e:
             return f"[Milvus 錯誤] {e}"
