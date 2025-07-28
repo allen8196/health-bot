@@ -18,7 +18,7 @@ notes = df["注意事項 / 補充說明"].fillna("").astype(str).tolist()
 # 合併 Q + A 作為語意輸入向量
 combined_texts = [q + " " + a for q, a in zip(questions, answers)]
 vectors = to_vector(combined_texts)
-VECTOR_DIM = vectors.shape[1]
+VECTOR_DIM = len(vectors[0])
 
 # 建立 Collection schema
 collection_name = "copd_qa"
@@ -44,7 +44,7 @@ collection.insert([
     answers,
     keywords,
     notes,
-    vectors.tolist()
+    vectors
 ])
 
 # 建立向量索引

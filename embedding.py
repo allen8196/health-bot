@@ -1,17 +1,28 @@
-from sentence_transformers import SentenceTransformer
-import numpy as np
+import os
+from openai import OpenAI
+from typing import Union, List
+from dotenv import load_dotenv
+load_dotenv()
 
-model = SentenceTransformer("BAAI/bge-large-zh")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # 請設置環境變數
 
-instruction = "為這個問題或句子生成一個向量："
-
-
-def to_vector(text, normalize=True):
-
+def to_vector(text: Union[str, List[str]], normalize: bool = True) -> List[float]:
     if isinstance(text, str):
-        return model.encode(instruction + text, normalize_embeddings=normalize)
+        inputs = [text]
     elif isinstance(text, list):
-        texts = [instruction + t for t in text]
-        return model.encode(texts, normalize_embeddings=normalize)
+        inputs = text
     else:
         raise TypeError("輸入必須為 str 或 List[str]")
+
+    # 呼叫 OpenAI API
+    response = client.embeddings.create(
+        model="text-embedding-3-small",
+        input=inputs
+    )
+
+    vectors = [r.embedding for r in response.data]
+
+    # 單一輸入時回傳一維向量
+    if isinstance(text, str):
+        return vectors[0]
+    return vectors

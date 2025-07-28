@@ -1,10 +1,10 @@
 # Python version: 3.11.9
-
+openai
 # Core LangChain libraries
 langchain
 langchain-core
 langchain-community
-langchain-ollama
+
 
 # Vector Database
 pymilvus
