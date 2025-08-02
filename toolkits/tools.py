@@ -6,17 +6,24 @@ import json
 from openai import OpenAI
 from datetime import datetime
 
+# === Milvus 快取 ===
+milvus_connected = False
+collection = None
+
 class SearchMilvusTool(BaseTool):
     name: str = "search_milvus"
     description: str = "在 Milvus 中搜尋 COPD 相關問答，回傳相似問題與答案"
 
     def _run(self, query: str) -> str:
+        global milvus_connected, collection
         try:
-            SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD"))
-            connections.connect(alias="default", uri="http://localhost:19530")
-            collection = Collection("copd_qa")
-            collection.load()
+            if not milvus_connected:
+                connections.connect(alias="default", uri="http://localhost:19530")
+                collection = Collection("copd_qa")
+                collection.load()
+                milvus_connected = True
 
+            SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", 0.6))
             user_vec = to_vector(query)
             if not isinstance(user_vec, list):
                 user_vec = user_vec.tolist() if hasattr(user_vec, 'tolist') else list(user_vec)
@@ -28,7 +35,6 @@ class SearchMilvusTool(BaseTool):
                 limit=5,
                 output_fields=["question", "answer", "category"]
             )
-            connections.disconnect(alias="default")
 
             chunks = []
             for hit in results[0]:
