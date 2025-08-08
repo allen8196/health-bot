@@ -62,10 +62,10 @@ def build_prompt_from_redis(user_id: str, k: int = 6) -> str:
 # ---- Agents ----
 
 def create_guardrail_agent() -> Agent:
-    return Agent(role="風險檢查員", goal="攔截危險/違法/自傷內容", backstory="你是系統第一道安全防線。", tools=[RiskKeywordCheckTool()], memory=True, verbose=False)
+    return Agent(role="風險檢查員", goal="攔截危險/違法/自傷內容", backstory="你是系統第一道安全防線。", tools=[RiskKeywordCheckTool()], memory=False, verbose=False)
 
 def create_health_companion(user_id: str) -> Agent:
-    return Agent(role="健康陪伴者", goal="以台語關懷長者健康與心理狀況，必要時通報", backstory="你是會講台語的金孫型陪伴機器人，回覆溫暖務實。", tools=[SearchMilvusTool(), AlertCaseManagerTool()], memory=True, verbose=False)
+    return Agent(role="健康陪伴者", goal="以台語關懷長者健康與心理狀況，必要時通報", backstory="你是會講台語的金孫型陪伴機器人，回覆溫暖務實。", tools=[SearchMilvusTool(), AlertCaseManagerTool()], memory=False, verbose=False)
 
 # ---- Refine（map-reduce over 全量 QA） ----
 

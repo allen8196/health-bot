@@ -1,9 +1,15 @@
 from crewai import Crew, Task
 from pymilvus import connections
 import os, time, threading
+from typing import Optional
 
 from HealthBot.agent import create_health_companion, create_guardrail_agent, finalize_session, build_prompt_from_redis
-from toolkits.redis_store import try_register_request, make_request_id, append_round, peek_next_n
+from toolkits.redis_store import (
+    try_register_request, make_request_id, append_round, peek_next_n,
+    append_audio_segment, read_and_clear_audio_segments, get_audio_result, set_audio_result,
+    get_redis, set_state_if
+)
+import hashlib
 from toolkits.tools import summarize_chunk_and_commit
 
 SUMMARY_CHUNK_SIZE = int(os.getenv("SUMMARY_CHUNK_SIZE", 5))
@@ -22,7 +28,7 @@ class AgentManager:
 
 # ---- Persist & maybe summarize ----
 
-def log_session(user_id: str, query: str, reply: str, request_id: str | None = None):
+def log_session(user_id: str, query: str, reply: str, request_id: Optional[str] = None):
     rid = request_id or make_request_id(user_id, query)
     if not try_register_request(user_id, rid):
         print("[去重] 跳過重複請求"); return
@@ -34,22 +40,61 @@ def log_session(user_id: str, query: str, reply: str, request_id: str | None = N
 
 # ---- Pipeline ----
 
-def handle_user_message(agent_manager: AgentManager, user_id: str, query: str) -> str:
-    guard = agent_manager.get_guardrail()
-    guard_task = Task(description=f"判斷是否危險：「{query}」。安全回 OK；危險回 BLOCK: <原因>", expected_output="OK 或 BLOCK: <原因>", agent=guard)
-    guard_res = (Crew(agents=[guard], tasks=[guard_task], verbose=False).kickoff().raw or "").strip()
-    if guard_res.startswith("BLOCK:"): return f"🚨 系統攔截：{guard_res[6:].strip()}"
+def handle_user_message(agent_manager: AgentManager, user_id: str, query: str,
+                        audio_id: Optional[str] = None, is_final: bool = True) -> str:
+    # 0) 統一音檔 ID（沒帶就用文字 hash 當臨時 ID，向後相容）
+    audio_id = audio_id or hashlib.sha1(query.encode("utf-8")).hexdigest()[:16]
 
-    care = agent_manager.get_health_agent(user_id)
-    ctx = build_prompt_from_redis(user_id, k=6)
-    task = Task(
-        description=f"{ctx}\n\n使用者輸入：{query}\n請以台語風格溫暖務實回覆；必要時使用工具。",
-        expected_output="台語風格的溫暖關懷回覆，必要時使用工具。",
-        agent=care,
-    )
-    res = (Crew(agents=[care], tasks=[task], verbose=False).kickoff().raw or "")
-    log_session(user_id, query, res)
-    return res
+    # 1) 非 final：不觸發任何 LLM/RAG/通報，只緩衝片段
+    if not is_final:
+        append_audio_segment(user_id, audio_id, query)
+        return "👌 已收到語音片段"
+
+    # 2) 音檔級鎖：一次且只一次處理同一段音檔
+    lock_id = f"{user_id}#audio:{audio_id}"
+    if not set_state_if(lock_id, expect="", to="PROCESSING"):
+        # 可能已處理或處理中 → 回快取或提示
+        cached = get_audio_result(user_id, audio_id)
+        return cached or "我正在處理你的語音，請稍等一下喔。"
+
+    try:
+        # 3) 合併之前緩衝的 partial → 最終要處理的全文
+        head = read_and_clear_audio_segments(user_id, audio_id)
+        full_text = (head + " " + query).strip() if head else query
+
+        # 4) 原本流程：先 guardrail，再 health agent（你現有碼原封搬過來）
+        # 設置環境變數供工具使用
+        os.environ["CURRENT_USER_ID"] = user_id
+        
+        guard = agent_manager.get_guardrail()
+        guard_task = Task(
+            description=f"判斷是否危險：「{full_text}」。務必使用 risk_keyword_check 工具檢查，安全回 OK；危險回 BLOCK: <原因>",
+            expected_output="OK 或 BLOCK: <原因>",
+            agent=guard
+        )
+        guard_res = (Crew(agents=[guard], tasks=[guard_task], verbose=False).kickoff().raw or "").strip()
+        if guard_res.startswith("BLOCK:"):
+            reply = f"🚨 系統攔截：{guard_res[6:].strip()}"
+            set_audio_result(user_id, audio_id, reply)
+            log_session(user_id, full_text, reply)
+            return reply
+
+        care = agent_manager.get_health_agent(user_id)
+        ctx = build_prompt_from_redis(user_id, k=6)
+        task = Task(
+            description=f"{ctx}\n\n使用者輸入：{full_text}\n請以台語風格溫暖務實回覆；必要時使用工具。",
+            expected_output="台語風格的溫暖關懷回覆，必要時使用工具。",
+            agent=care,
+        )
+        res = (Crew(agents=[care], tasks=[task], verbose=False).kickoff().raw or "")
+
+        # 5) 結果快取 + 落歷史（你原本就有 log_session）
+        set_audio_result(user_id, audio_id, res)
+        log_session(user_id, full_text, res)
+        return res
+
+    finally:
+        set_state_if(lock_id, expect="PROCESSING", to="FINALIZED")
 
 class UserSession:
     def __init__(self, user_id: str, agent_manager: AgentManager, timeout: int = 300):

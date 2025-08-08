@@ -141,3 +141,75 @@ def purge_user_session(user_id: str) -> int:
     for k in keys: p.delete(k)
     res = p.execute()
     return sum(res)
+
+
+# --- CAS-style setter for session state ---
+def set_state_if(user_id: str, expect: str, to: str) -> bool:
+    """
+    Conditionally set the user's session state with a compare-and-set semantic.
+
+    Args:
+        user_id: the user/session id
+        expect: expected current state; if None or empty, allow set when no state is present
+        to: new state to set
+
+    Returns:
+        True if state is set successfully; False if the current state mismatches `expect` or a contention occurs.
+    """
+    r = get_redis()
+    key = f"session:{user_id}:state"
+    try:
+        with r.pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(key)
+                    cur = pipe.get(key)
+                    # 修復鎖語意：當 expect 為空時，只允許「鍵不存在或為空」時設值
+                    if expect is None or expect == "":
+                        # 只有在「尚未設值或為空」時才允許設值
+                        if cur not in (None, ""):
+                            pipe.unwatch()
+                            return False
+                    else:
+                        if cur != expect:
+                            pipe.unwatch()
+                            return False
+                    pipe.multi()
+                    pipe.set(key, to)
+                    pipe.execute()
+                    try:
+                        _touch_ttl([key])
+                    except Exception:
+                        # If TTL helper isn't available for any reason, don't fail the state set
+                        pass
+                    return True
+                except redis.WatchError:
+                    # Another writer modified the key; report failure instead of spinning
+                    return False
+    except Exception:
+        return False
+# === Audio segments buffer & result cache（音檔級） ===
+
+def append_audio_segment(user_id: str, audio_id: str, seg: str, ttl_sec: int = 3600) -> None:
+    r = get_redis()
+    key = f"audio:{user_id}:{audio_id}:buf"
+    r.rpush(key, seg)
+    r.expire(key, ttl_sec)
+
+def read_and_clear_audio_segments(user_id: str, audio_id: str) -> str:
+    r = get_redis()
+    key = f"audio:{user_id}:{audio_id}:buf"
+    with r.pipeline() as p:
+        p.lrange(key, 0, -1); p.delete(key)
+        parts, _ = p.execute()
+    try:
+        parts = [x if isinstance(x, str) else x.decode("utf-8","ignore") for x in parts]
+    except Exception:
+        parts = []
+    return " ".join([p.strip() for p in parts if p])
+
+def get_audio_result(user_id: str, audio_id: str) -> Optional[str]:
+    return get_redis().get(f"audio:{user_id}:{audio_id}:result")
+
+def set_audio_result(user_id: str, audio_id: str, reply: str, ttl_sec: int = 86400) -> None:
+    get_redis().set(f"audio:{user_id}:{audio_id}:result", reply, ex=ttl_sec)

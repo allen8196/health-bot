@@ -22,7 +22,11 @@ class SearchMilvusTool(BaseTool):
         global _milvus_loaded, _collection
         try:
             if not _milvus_loaded:
-                connections.connect(alias="default", uri=os.getenv("MILVUS_URI", "http://localhost:19530"))
+                # 避免重複連線，檢查是否已連線
+                try:
+                    connections.get_connection("default")
+                except:
+                    connections.connect(alias="default", uri=os.getenv("MILVUS_URI", "http://localhost:19530"))
                 _collection = Collection("copd_qa"); _collection.load(); _milvus_loaded = True
             thr = float(os.getenv("SIMILARITY_THRESHOLD", 0.6))
             vec = to_vector(query)
@@ -66,7 +70,8 @@ class AlertCaseManagerTool(BaseTool):
 
     def _run(self, reason: str) -> str:
         try:
-            xid = xadd_alert(user_id=self.runtime_context.get("user_id", "unknown"), reason=reason, severity="high")
+            uid = self.runtime_context.get("user_id") or os.getenv("CURRENT_USER_ID", "unknown")
+            xid = xadd_alert(user_id=uid, reason=reason, severity="high")
             return f"⚠️ 已通報個管師（事件ID: {xid}），事由：{reason}"
         except Exception as e:
             return f"[Alert 送出失敗] {e}"
