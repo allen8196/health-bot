@@ -26,3 +26,11 @@ def to_vector(text: Union[str, List[str]], normalize: bool = True) -> List[float
     if isinstance(text, str):
         return vectors[0]
     return vectors
+
+
+def safe_to_vector(text, normalize: bool = True):
+    try:
+        return to_vector(text, normalize=normalize)
+    except Exception as e:
+        print(f"[embedding error] {e}")
+        return []

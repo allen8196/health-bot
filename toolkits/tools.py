@@ -17,7 +17,7 @@ _collection = None
 class SearchMilvusTool(BaseTool):
     name: str = "search_milvus"
     description: str = "在 Milvus 中搜尋 COPD 相關問答，回傳相似問題與答案"
-
+    print(description)
     def _run(self, query: str) -> str:
         global _milvus_loaded, _collection
         try:
@@ -76,11 +76,46 @@ class AlertCaseManagerTool(BaseTool):
         except Exception as e:
             return f"[Alert 送出失敗] {e}"
 
-class RiskKeywordCheckTool(BaseTool):
-    name: str = "risk_keyword_check"
-    description: str = "檢查輸入是否包含危險、違法、自殺等關鍵詞"
+
+# ==== LLM-based Guardrail ====
+class ModelGuardrailTool(BaseTool):
+    name: str = "model_guardrail"
+    description: str = "使用 LLM 判斷輸入是否涉及違法、危險、自傷，或屬於需專業人士回覆的內容；只回 OK 或 BLOCK: <原因>"
 
     def _run(self, text: str) -> str:
-        DANGEROUS = ["自殺","跳樓","割腕","炸彈","殺人","槍","毒品","虐待","暴力","性侵"]
-        hit = [kw for kw in DANGEROUS if kw in text]
-        return f"BLOCK: 偵測到關鍵字：{'、'.join(hit)}" if hit else "OK"
+        try:
+            client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            guard_model = os.getenv("GUARD_MODEL", os.getenv("MODEL_NAME", "gpt-4o-mini"))
+            sys = (
+                "你是安全審查器，需精準判斷是否必須攔截。\n"
+                "【允許（回 OK）】以下情況一律放行：\n"
+                "- 症狀敘述或一般健康資訊的詢問（例如：症狀、成因、風險因子、何時就醫的提醒）。\n"
+                "- 一般生活保健/衛教/注意事項等非個案化、非指令性的建議。\n"
+                "【必須攔截（回 BLOCK: <原因>）】符合任一條件：\n"
+                "1) 違法/危險行為的教學、買賣、製作或規避（毒品、武器、暴力、駭客、爆裂物等）。\n"
+                "2) 自傷/他傷/自殺/自殘的指導或鼓勵。\n"
+                "3) 成人性內容或未成年相關不當內容的請求。\n"
+                "4) 醫療/用藥/劑量/診斷/處置等『具體、個案化、可執行』的專業指示或方案。\n"
+                "5) 法律、投資、稅務等高風險領域之『具體、可執行』的專業指導。\n"
+                "【判斷原則】僅在請求明確落入上述攔截條件時才 BLOCK；\n"
+                "若是描述狀況或尋求一般性說明/保健建議，請回 OK。若不確定，預設回 OK。\n"
+                "【輸出格式】只能是：\n"
+                "OK\n"
+                "或\n"
+                "BLOCK: <極簡原因>\n"
+            )
+            user = f"使用者輸入：{text}\n請依規則只輸出 OK 或 BLOCK: <原因>。"
+            res = client.chat.completions.create(
+                model=guard_model,
+                messages=[{"role":"system","content":sys},{"role":"user","content":user}],
+                temperature=0,
+                max_tokens=24,
+            )
+            out = (res.choices[0].message.content or "").strip()
+            # 保底格式：預設放行以降低誤攔
+            if not out.startswith("OK") and not out.startswith("BLOCK:"):
+                out = "OK"
+            return out
+        except Exception as e:
+            # 失敗時寧可保守攔截（維持不變）
+            return f"BLOCK: guardrail 服務錯誤（{e}）"

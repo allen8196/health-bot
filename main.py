@@ -7,7 +7,7 @@ from HealthBot.agent import create_health_companion, create_guardrail_agent, fin
 from toolkits.redis_store import (
     try_register_request, make_request_id, append_round, peek_next_n,
     append_audio_segment, read_and_clear_audio_segments, get_audio_result, set_audio_result,
-    get_redis, set_state_if
+    get_redis, set_state_if, xadd_alert
 )
 import hashlib
 from toolkits.tools import summarize_chunk_and_commit
@@ -68,21 +68,29 @@ def handle_user_message(agent_manager: AgentManager, user_id: str, query: str,
         
         guard = agent_manager.get_guardrail()
         guard_task = Task(
-            description=f"判斷是否危險：「{full_text}」。務必使用 risk_keyword_check 工具檢查，安全回 OK；危險回 BLOCK: <原因>",
+            description=(
+                f"判斷是否需要攔截：「{full_text}」。"
+                "務必使用 model_guardrail 工具進行判斷；"
+                "安全回 OK；需要攔截時回 BLOCK: <原因>（僅此兩種）。"
+            ),
             expected_output="OK 或 BLOCK: <原因>",
             agent=guard
         )
         guard_res = (Crew(agents=[guard], tasks=[guard_task], verbose=False).kickoff().raw or "").strip()
         if guard_res.startswith("BLOCK:"):
-            reply = f"🚨 系統攔截：{guard_res[6:].strip()}"
+            reason = guard_res[6:].strip()
+            # 檢查是否涉及自傷風險，需要通報個管師
+            if any(k in reason for k in ["自傷", "自殺", "傷害自己", "緊急"]):
+                xadd_alert(user_id=user_id, reason=f"可能自傷風險：{full_text}", severity="high")
+            reply = "抱歉，這個問題涉及違規或需專業人士評估，我無法提供解答。"
             set_audio_result(user_id, audio_id, reply)
             log_session(user_id, full_text, reply)
             return reply
 
         care = agent_manager.get_health_agent(user_id)
-        ctx = build_prompt_from_redis(user_id, k=6)
+        ctx = build_prompt_from_redis(user_id, k=6, current_input=full_text)
         task = Task(
-            description=f"{ctx}\n\n使用者輸入：{full_text}\n請以台語風格溫暖務實回覆；必要時使用工具。",
+            description=f"{ctx}\n\n使用者輸入：{full_text}\n請以台語風格溫暖務實回覆；有需要查看COPD相關資料或緊急事件需要通報時，請使用工具。",
             expected_output="台語風格的溫暖關懷回覆，必要時使用工具。",
             agent=care,
         )
