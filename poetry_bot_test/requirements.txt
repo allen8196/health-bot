@@ -1,0 +1,42 @@
+# Python version: 3.11.9
+
+# LLM 與 AI
+openai
+
+# CrewAI
+crewai
+# crewai-tools
+
+# LangChain
+# langchain
+# langchain-core
+# langchain-community
+
+# Milvus 向量資料庫
+pymilvus
+
+# 資料處理
+pandas
+# openpyxl
+# sentence-transformers
+numpy
+
+# PyTorch 與 Transformers
+# torch
+# transformers
+# accelerate
+
+# 環境變數
+python-dotenv
+
+# Redis
+redis
+
+# Postgre、排程
+psycopg2-binary
+APScheduler
+requests
+
+#Line Bot
+Flask
+line-bot-sdk
