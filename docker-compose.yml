@@ -11,6 +11,7 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d 
     restart: unless-stopped
     # --- 新增結束 ---
   etcd:
@@ -96,6 +97,39 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+  chatbot-app:
+    container_name: healthbot_app
+    build: .  # 使用當前目錄的 Dockerfile 來建置映像
+    command: python main.py # 容器啟動時要執行的指令
+    ports:
+      - "5000:5000" # 將容器的 5000 port 映射到本機的 5000 port
+    volumes:
+      - .:/app # 將本地程式碼掛載到容器中，方便修改後立即生效，無需重啟
+    environment:
+      - PYTHONUNBUFFERED=1 # 讓 print() 日誌能即時顯示
+    env_file:
+      - .env # 讀取 .env 檔案中的所有環境變數
+    depends_on: # 確保在資料庫服務都啟動後再啟動
+      - postgres
+      - redis
+      - milvus
+    restart: unless-stopped
+  proactive-scheduler:
+    container_name: healthbot_scheduler
+    build: . # 同樣使用根目錄的 Dockerfile
+    command: python ProactiveCare/scheduler.py # 覆寫啟動指令
+    volumes:
+      - .:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+      - milvus
+    restart: unless-stopped
+
 volumes:
   postgres_data: {}
   etcd_data: null
