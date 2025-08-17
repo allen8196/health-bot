@@ -38,6 +38,44 @@ from toolkits.redis_store import (
     xadd_alert,
 )
 from toolkits.tools import summarize_chunk_and_commit
+from utils.db_connectors import get_user_profile
+from datetime import datetime
+import json
+
+# 【新增】將最終的 Companion Prompt 模板放在此處
+COMPANION_PROMPT_TEMPLATE = """
+# ROLE & GOAL (角色與目標)
+你是一位溫暖、務實且帶有台灣閩南語風格的數位金孫。你的目標是根據以下提供的完整上下文，生成一句**極其簡潔、自然、口語化、像家人一樣**的回應。
+
+# CORE LOGIC & RULES (核心邏輯與規則)
+1.  **情境優先**: 你的所有回覆都**必須**基於以下提供的 [上下文]，特別是 [使用者畫像]、[相關記憶] 和 [近期對話]。不要依賴你的通用知識庫。
+2.  **簡潔至上**: 絕對不要說教或給予冗長的罐頭建議。你的回答應該像真人聊天，**通常只包含 1 到 3 句話**。
+3.  **展現記憶**: 如果上下文中有相關內容，請**自然地**在回應中提及，以展現你記得之前的對話。
+4.  **時間感知**: [當前時間] 欄位提供了現在的準確時間，請用它來回答任何關於時間的問題。
+5.  **衛教原則**: 只有在 Agent 內部判斷需要，並成功使用工具查詢到 [相關檢索資訊] 時，才可**簡要引用**。永遠不要提供醫療建議。如果檢索內容不足以回答，就誠實地回覆：「這個問題比較專業，建議請教醫生喔！」
+6.  **人設一致**: 保持「金孫」人設，語氣要像家人一樣親切。
+7.  **誠實原則**: 對於你無法從上下文中得知的「事實性」資訊（例如：家人的具體近況、天氣預報等），你必須誠實地表示不知道。你可以用提問或祝福的方式來回應，但**嚴禁編造或臆測答案**。
+
+# CONTEXT (上下文)
+[當前時間]: {now}
+[使用者畫像 (Profile)]: {profile_data}
+[相關記憶 (LTM-RAG)]: {ltm_rag_result}
+[歷史摘要 (MTM)]: {summary_text}
+[近期對話 (STM)]: {stm_text}
+
+[使用者最新問題]:
+{query}
+
+# TASK (你的任務)
+
+基於以上所有 CONTEXT，特別是 [使用者畫像]，自然地回應使用者的最新問題。
+你的回應必須極其簡潔、溫暖且符合「金孫」人設。
+
+**工具使用規則**:
+- 如果，且僅當你判斷使用者的問題是在詢問一個**具體的、你不知道的 COPD 相關衛教知識**時，你才應該使用 `search_milvus` 工具來查詢。
+- 在其他情況下（例如閒聊、回應個人狀況），請**不要**使用 `search_milvus` 工具。
+"""
+
 
 # Flask App 初始化
 app = Flask(__name__)
@@ -114,10 +152,11 @@ def handle_user_message(
         head = read_and_clear_audio_segments(user_id, audio_id)
         full_text = (head + " " + query).strip() if head else query
 
-        # 4) 原本流程：先 guardrail，再 health agent（你現有碼原封搬過來）
+        # 4)【核心流程】
         # 設置環境變數供工具使用
         os.environ["CURRENT_USER_ID"] = user_id
 
+        # a. 呼叫 Guardrail
         guard = agent_manager.get_guardrail()
         guard_task = Task(
             description=(
@@ -145,16 +184,35 @@ def handle_user_message(
             log_session(user_id, full_text, reply)
             return reply
 
-        care = agent_manager.get_health_agent(user_id)
+        # 4.2) 【新增】在所有 Agent 運作前，優先讀取使用者畫像 (Profile)
+        profile_data = get_user_profile(user_id)
+        profile_str = json.dumps(profile_data, ensure_ascii=False, indent=2) if profile_data else "尚無使用者畫像資訊"
+        # 4.3) 建構基礎上下文（包含自動 LTM-RAG）
         ctx = build_prompt_from_redis(user_id, k=6, current_input=full_text)
-        task = Task(
-            description=f"{ctx}\n\n使用者輸入：{full_text}\n請以台語風格溫暖務實回覆；有需要查看COPD相關資料或緊急事件需要通報時，請使用工具。",
-            expected_output="台語風格的溫暖關懷回覆，必要時使用工具。",
-            agent=care,
+        # 4.4) 建立 Companion Agent 並組合最終任務
+        care_agent = agent_manager.get_health_agent(user_id)
+        
+        # 組合所有資訊到模板中
+        final_description = COMPANION_PROMPT_TEMPLATE.format(
+            now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            profile_data=profile_str,
+            ltm_rag_result=ctx.get("ltm_rag_result", "無"),
+            summary_text=ctx.get("summary_text", "無"),
+            stm_text=ctx.get("stm_text", "無"),
+            query=full_text
         )
-        res = Crew(agents=[care], tasks=[task], verbose=False).kickoff().raw or ""
 
-        # 5) 結果快取 + 落歷史（你原本就有 log_session）
+        task = Task(
+            description=final_description,
+            expected_output="一句簡潔、溫暖、符合金孫人設的中文回覆。",
+            agent=care_agent,
+        )
+        
+        # CrewAI 執行任務。Agent 會在此步驟中自主決定是否使用 SearchMilvusTool
+        # 其結果會被 CrewAI 自動注入到後續的思考鏈中
+        res = (Crew(agents=[care_agent], tasks=[task], verbose=False).kickoff().raw or "")
+
+        # 5) 結果快取與狀態更新
         set_audio_result(user_id, audio_id, res)
         log_session(user_id, full_text, res)
         return res

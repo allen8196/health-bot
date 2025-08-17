@@ -11,6 +11,7 @@ except Exception:  # pragma: no cover
     utility = None  # 後續以舊法回退
 from embedding import safe_to_vector
 import time
+from typing import Dict, Any
 
 STM_MAX_CHARS = int(os.getenv("STM_MAX_CHARS", 1800))
 SUMMARY_MAX_CHARS = int(os.getenv("SUMMARY_MAX_CHARS", 3000))
@@ -180,27 +181,39 @@ def _shrink_tail(text: str, max_chars: int) -> str:
     tail = text[-max_chars:]; idx = tail.find("--- ")
     return tail[idx:] if idx != -1 else tail
 
-def build_prompt_from_redis(user_id: str, k: int = 6, current_input: str = "") -> str:
+def build_prompt_from_redis(user_id: str, k: int = 6, current_input: str = "") -> Dict[str, Any]:
+    """
+    修改此函式，使其回傳一個包含不同記憶層次的字典，而非單一字串。
+    """
     summary, _ = get_summary(user_id)
-    summary = _shrink_tail(summary, SUMMARY_MAX_CHARS) if summary else ""
+    summary_text = _shrink_tail(summary, SUMMARY_MAX_CHARS) if summary else "無"
+    
     rounds = fetch_unsummarized_tail(user_id, k=max(k,1))
     def render(rs): return "\n".join([f"長輩：{r['input']}\n金孫：{r['output']}" for r in rs])
-    chat = render(rounds)
-    while len(chat) > STM_MAX_CHARS and len(rounds) > 1:
-        rounds = rounds[1:]; chat = render(rounds)
-    if len(chat) > STM_MAX_CHARS and rounds: chat = chat[-STM_MAX_CHARS:]
-    parts = []
-    if summary: parts.append("📌 歷史摘要：\n" + summary)
-    if chat: parts.append("🕓 近期對話（未摘要）：\n" + chat)
-    # --- 確保使用者存在，並進行記憶檢索 ---
+    
+    stm_text = render(rounds)
+    # 此處的 token 限制邏輯維持不變
+    while len(stm_text) > STM_MAX_CHARS and len(rounds) > 1:
+        rounds = rounds[1:]; stm_text = render(rounds)
+    if len(stm_text) > STM_MAX_CHARS and rounds: stm_text = stm_text[-STM_MAX_CHARS:]
+    if not stm_text: stm_text = "無"
+
+    # --- 記憶檢索 (LTM-RAG) ---
     _ensure_user_exists(user_id)
+    ltm_rag_result = "無"
     if current_input:
         qv = safe_to_vector(current_input)
-        if qv:  # 只有在向量化成功時才搜索
+        if qv:
             mem_txt = _search_memory_top1(user_id, qv, threshold=MEM_THRESHOLD)
-            if mem_txt and mem_txt.strip():  # 只有在有實際內容時才顯示
-                parts.insert(0, f"⭐ 追蹤重點：\n{mem_txt}")
-    return "\n\n".join(parts)
+            if mem_txt and mem_txt.strip():
+                ltm_rag_result = mem_txt
+    
+    # 回傳一個結構化的字典
+    return {
+        "summary_text": summary_text,
+        "stm_text": stm_text,
+        "ltm_rag_result": ltm_rag_result
+    }
 
 # ---- Agents ----
 
