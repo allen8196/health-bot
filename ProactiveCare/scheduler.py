@@ -23,7 +23,7 @@ def main():
     scheduler.add_job(
         check_and_trigger_dynamic_care,
         trigger="interval",
-        minutes=1,
+        minutes=10,
         id="dynamic_care_trigger",
         name="檢查 24 小時閒置使用者",
         replace_existing=True,

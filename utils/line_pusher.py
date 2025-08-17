@@ -6,9 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
-LINE_API_URL = (
-    "[https://api.line.me/v2/bot/message/push](https://api.line.me/v2/bot/message/push)"
-)
+LINE_API_URL = "https://api.line.me/v2/bot/message/push"
 
 
 def send_line_message(user_id: str, message: str) -> bool:
